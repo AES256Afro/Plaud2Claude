@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Image builds
+        run: docker build -t plaud2claude:ci .
+      - name: Tests (inside the image, beside OpenPlaud's modules)
+        run: docker run --rm -v "$PWD/tests:/tests:ro" -v "$PWD/plaud2claude.py:/app/plaud2claude.py:ro" -w /app plaud2claude:ci python3 -m unittest discover -s /tests -v
+      - name: Container serves its page
+        run: |
+          docker run -d --name p2c -p 8796:8796 -e P2C_SYNC_EVERY=0 plaud2claude:ci
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8796/healthz && break; sleep 1; done
+          curl -fsS http://127.0.0.1:8796/healthz || { docker logs p2c; exit 1; }
+          curl -fsS -o /dev/null http://127.0.0.1:8796/ || { docker logs p2c; exit 1; }
+
+  image:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/aes256afro/plaud2claude
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: mode=max
+          sbom: true
