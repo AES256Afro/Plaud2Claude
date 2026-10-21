@@ -201,6 +201,12 @@ class SweepOne(unittest.TestCase):
         self.assertFalse(bridge.clock.quick_mode)
         self.assertEqual(p2c.load()["waiting_since"], {})
 
+    def test_an_old_recording_without_a_transcript_doesnt_bring_checks_forward(self):
+        fresh_state()
+        old = dict(rec("silent"), created_at=(datetime.now(timezone.utc) - timedelta(days=2)).replace(tzinfo=None).isoformat())
+        bridge = self.run_job(("sync",), [old])
+        self.assertFalse(bridge.clock.quick_mode)
+
     def test_the_check_trigger_needs_its_token(self):
         token = "t" * 24
         self.assertTrue(p2c.core.trigger_allowed({"Authorization": "Bearer " + token}, token))

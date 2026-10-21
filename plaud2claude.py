@@ -16,7 +16,7 @@ import threading
 import time
 import urllib.parse
 from collections import deque
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from html import escape as e
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -198,6 +198,14 @@ def send(rec: dict, transcript: str, notes: list, state: dict, log, persist=lamb
     return True
 
 
+def received_ts(rec: dict) -> float:
+    """When Plaud received a recording (its created_at, naive UTC), as a timestamp; now when Plaud doesn't say."""
+    try:
+        return datetime.fromisoformat(rec["created_at"]).replace(tzinfo=timezone.utc).timestamp()
+    except (KeyError, TypeError, ValueError):
+        return time.time()
+
+
 def rec_name(rec: dict) -> str:
     name = rec.get("name")
     return str(name) if name not in (None, "") else pa.rec_id(rec)
@@ -295,7 +303,8 @@ class Bridge:
                 # Recordings still waiting on Plaud (no transcript or summary yet) bring the next check forward.
                 now = time.time()
                 waiting = {pa.rec_id(r) for r in recs if self.status.get(pa.rec_id(r)) in ("no_transcript", "waiting_summary")}
-                state["waiting_since"] = {rid: state["waiting_since"].get(rid, now) for rid in waiting}
+                received = {pa.rec_id(r): received_ts(r) for r in recs}
+                state["waiting_since"] = {rid: min(state["waiting_since"].get(rid, now), received.get(rid, now)) for rid in waiting}
                 save(state)
                 self.clock.checked(list(state["waiting_since"].values()))
                 self.last_sync = datetime.now().strftime("%-d %b %H:%M")
