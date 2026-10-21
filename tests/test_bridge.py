@@ -95,9 +95,6 @@ class Bridge(unittest.TestCase):
         self.assertTrue(state["sent"]["r1"]["with_summary"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class FakePlaud:
     """Just enough of the Plaud client for the bridge's loop."""
@@ -150,7 +147,7 @@ class SweepOne(unittest.TestCase):
     def test_a_damaged_state_is_kept_and_only_new_recordings_go(self):
         p2c.STATE.write_text("{half")
         state = p2c.load()
-        self.assertTrue(state["damaged"])
+        self.assertTrue(state["damaged_at"])
         self.assertTrue(any(p.name.startswith("plaud2claude.json.damaged-") for p in p2c.STATE.parent.iterdir()))
         self.assertEqual(p2c.decide(rec(minutes_ago=60), state, "t", ["n"], False, time.time()), "before")
 
@@ -177,3 +174,21 @@ class SweepOne(unittest.TestCase):
         self.assertFalse(p2c.send(rec(), "t", [], state, lambda m: None))
         self.assertEqual(Fake.texts, [])
         self.assertTrue(state["failed"]["r1"]["retryable"])
+
+    def test_a_file_damaged_while_running_is_replaced_at_once(self):
+        fresh_state()
+        p2c.STATE.write_text("{half")
+        first, second = p2c.load(), p2c.load()
+        self.assertTrue(first.get("since") and second.get("since") == first["since"])
+
+    def test_an_unsaved_send_is_settled_before_the_next_job(self):
+        state = fresh_state()
+        state["inflight"]["r1"] = {"at": datetime.now().isoformat()}
+        p2c.save(state)
+        self.run_job(("sync",), [rec()])
+        self.assertEqual(Fake.texts, [])
+        self.assertFalse(p2c.load()["failed"]["r1"]["retryable"])
+
+
+if __name__ == "__main__":
+    unittest.main()

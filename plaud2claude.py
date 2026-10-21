@@ -61,18 +61,23 @@ def claude_on() -> bool:
 
 # ---------------------------------------------------------------- state
 
+state_io = threading.RLock()
+
+
 def load() -> dict:
-    """The saved state. A missing file is a fresh start. A damaged one is set aside (never deleted) and the
-    fresh state only sends recordings made from now on, so nothing already in Claude is sent again."""
-    try:
-        state = json.loads(STATE.read_text())
-        if not isinstance(state, dict):
-            raise ValueError("not an object")
-    except FileNotFoundError:
-        state = {}
-    except ValueError:
-        STATE.replace(STATE.with_name(f"{STATE.name}.damaged-{int(time.time())}"))
-        state = {"since": datetime.now().isoformat(), "damaged": True}
+    """The saved state. A missing file is a fresh start. A damaged one is set aside (never deleted) and replaced
+    at once by a fresh state that only sends recordings made from now on, so nothing already in Claude goes again."""
+    with state_io:
+        try:
+            state = json.loads(STATE.read_text())
+            if not isinstance(state, dict):
+                raise ValueError("not an object")
+        except FileNotFoundError:
+            state = {}
+        except ValueError:
+            STATE.replace(STATE.with_name(f"{STATE.name}.damaged-{int(time.time())}"))
+            state = {"since": datetime.now().isoformat(), "damaged_at": time.time()}
+            save(state)
     for key in ("sent", "failed", "first_seen", "inflight"):
         state.setdefault(key, {})
     state.setdefault("fires", [])
@@ -80,12 +85,13 @@ def load() -> dict:
 
 
 def save(state: dict) -> None:
-    tmp = STATE.with_suffix(".tmp")
-    with tmp.open("w") as f:
-        f.write(json.dumps(state, indent=2))
-        f.flush()
-        os.fsync(f.fileno())
-    tmp.replace(STATE)
+    with state_io:
+        tmp = STATE.with_suffix(".tmp")
+        with tmp.open("w") as f:
+            f.write(json.dumps(state, indent=2))
+            f.flush()
+            os.fsync(f.fileno())
+        tmp.replace(STATE)
 
 
 def settle_inflight(state: dict) -> int:
@@ -250,6 +256,9 @@ class Bridge:
         with plaud.lock, lock:
             p = plaud.get()
             state = load()
+            # Only this worker sends, so anything still marked in flight is an attempt whose outcome was never saved.
+            if settle_inflight(state):
+                save(state)
             if job[0] == "sync":
                 since = (date.today() - timedelta(days=SYNC_DAYS)).isoformat()
                 recs = sorted(pa.list_recordings(p, since, None, None), key=lambda r: pa.recorded_at(r) or datetime.min)
@@ -276,6 +285,8 @@ class Bridge:
                     self.say(f"– {sent.get('name') or rid} is already in Claude; not sent again")
                 else:
                     rec = pa.unwrap_file(p.call_json("get_file", file_id=rid))
+                    if not (rec.get("id") or rec.get("file_id")):
+                        rec["id"] = rid
                     if self._one(p, rec, state, manual=True) is None:
                         self.say(f"– {rec_name(rec)}: Plaud has no transcript for it yet")
             save(state)
@@ -332,7 +343,9 @@ def page_body(look: str, flash: str | None) -> tuple[str, dict]:
             link = (f'<a class="btn small" href="{e(url)}" target="_blank" rel="noopener noreferrer">Open in Claude ↗</a>'
                     if url.startswith("https://") else "")
             again = (f'<input type="hidden" name="again" value="{e(str(sent.get("at", "")))}">' if sent else "")
-            confirm = (' onsubmit="return confirm(\'This starts a second Claude session for this recording. Send it again?\')"' if sent else "")
+            unsure = bool(failure and failure.get("retryable") is False)
+            confirm = (' onsubmit="return confirm(\'This starts a second Claude session for this recording. Send it again?\')"' if sent else
+                       ' onsubmit="return confirm(\'The last send may have reached Claude. Check claude.ai/code first. Send anyway?\')"' if unsure else "")
             button = (f'<form class="inline" method="post" action="/send"{confirm}><input type="hidden" name="id" value="{e(rid)}">{again}'
                       f'<button class="btn small">{"Send again" if sent else "Send now"}</button></form>') if claude_on() else ""
             err = (f'<div class="muted" style="font-size:12px">{"Last send again failed: " if sent else ""}{e(str(failure.get("error", "")))}</div>'
@@ -355,7 +368,7 @@ def page_body(look: str, flash: str | None) -> tuple[str, dict]:
     open_warn = ('<p class="flash">No page password is set, so anyone who can reach this page can send recordings and change the '
                  'Plaud sign-in. Set one in BoxPilot (Plaud2Claude › Settings › Page password).</p>') if not PASSWORD else ""
     damaged = ('<p class="flash">The saved state was damaged and was set aside beside it. Only recordings made from now on are sent '
-               'automatically.</p>') if state.get("damaged") else ""
+               'automatically.</p>') if time.time() - float(state.get("damaged_at") or 0) < 86400 else ""
     lock_btn = '<form class="inline" method="post" action="/logout"><button class="btn small">Lock</button></form>' if PASSWORD else ""
     body = f"""<div style="max-width:1100px;margin:0 auto;padding:24px 20px 48px">
 <div class="spread"><div><div class="mono muted" style="font-size:12px">Plaud2Claude {VERSION}</div><h1 style="margin:4px 0 0">Plaud → Claude</h1></div>
