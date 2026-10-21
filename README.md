@@ -28,7 +28,7 @@ It's also in the BoxPilot App Catalog.
    minutes.
 2. At [claude.ai/code/routines](https://claude.ai/code/routines), create a scheduled task with the prompt shown under
    **Set up Claude** on the page. Add an **API** trigger, then copy its Fire URL and generate a token.
-3. Put the Fire URL and token in the settings.
+3. In BoxPilot, open Plaud2Claude › Settings and paste them into **Claude fire URL** and **Claude token**.
 
 From then on, each new recording is sent once its transcript is ready, waiting up to `P2C_WAIT_FOR_SUMMARY` minutes
 for Plaud's summary.
@@ -39,7 +39,8 @@ for Plaud's summary.
 | --- | --- | --- |
 | `CLAUDE_ROUTINE_URL` | Fire URL of the scheduled task's API trigger (or just its `trig_…` id) | |
 | `CLAUDE_ROUTINE_TOKEN` | That trigger's token | |
-| `P2C_PASSWORD` | Password for the page | |
+| `P2C_PASSWORD` | Password for the page (recommended: without one, anyone who can reach the page can send recordings) | |
+| `P2C_ALLOWED_HOSTS` | Extra host names the page answers to, comma-separated. IP addresses, `localhost`, `*.local`, single-label names and `*.ts.net` always work. | |
 | `P2C_SYNC_EVERY` | Minutes between checks for new recordings; `0` turns it off | `30` |
 | `P2C_SYNC_DAYS` | How far back each check looks | `3` |
 | `P2C_WAIT_FOR_SUMMARY` | Minutes to wait for Plaud's own summary before sending without it | `30` |

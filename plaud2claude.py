@@ -316,7 +316,7 @@ bridge = None
 # ---------------------------------------------------------------- page
 
 STATUS = {"sent": ("In Claude", "ok"), "send": ("Sending…", "warn"), "no_transcript": ("No transcript yet", "none"),
-          "waiting_summary": ("Waiting for Plaud's summary", "info"), "before": ("Before setup", "none"),
+          "waiting_summary": ("Waiting for Plaud's summary", "info"), "before": ("Older than setup · use Send now", "none"),
           "failed": ("Not sent", "warn"), "new": ("Not checked yet", "none"), "error": ("Plaud error, retried", "warn")}
 
 
@@ -329,8 +329,10 @@ def page_body(look: str, flash: str | None) -> tuple[str, dict]:
     if pl["state"] == "signed_in":
         try:
             recs = plaud.recordings()
-        except (TimeoutError, pa.PlaudError):
-            recs = None
+        except TimeoutError:
+            recs, why = None, "Plaud is busy; reload in a moment."
+        except pa.PlaudError as err:
+            recs, why = None, f"Plaud said: {str(err).splitlines()[0][:200]}"
         for r in recs or []:
             rid = pa.rec_id(r)
             when = pa.recorded_at(r)
@@ -354,7 +356,7 @@ def page_body(look: str, flash: str | None) -> tuple[str, dict]:
                         f'<td>{e(rec_name(r))}{err}</td><td class="hide-sm">{e(pa.duration(r))}</td>'
                         f'<td><span class="badge {kind}">{e(label)}</span></td><td><div class="row">{link}{button}</div></td></tr>')
         table = (f'<div class="scroll"><table><tr><th>Recorded</th><th>Name</th><th class="hide-sm">Length</th><th>Claude</th><th></th></tr>'
-                 f'{"".join(rows)}</table></div>') if rows else f'<p class="muted">{"Plaud is busy; reload in a moment." if recs is None else f"No recordings in the last {SYNC_DAYS} days."}</p>'
+                 f'{"".join(rows)}</table></div>') if rows else f'<p class="muted">{e(why) if recs is None else f"No recordings in the last {SYNC_DAYS} days."}</p>'
     else:
         table = '<p class="muted">Recordings appear once Plaud is signed in.</p>'
 
