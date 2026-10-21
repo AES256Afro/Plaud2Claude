@@ -99,7 +99,7 @@ def settle_inflight(state: dict) -> int:
     automatically. Each shows as not sent, with a note to check Claude before sending it again."""
     for rid, info in state["inflight"].items():
         state["failed"][rid] = {"error": "The app stopped while this was being sent. Check claude.ai/code for its session "
-                                         "before sending it again.", "retryable": False, "at": info.get("at") or datetime.now().isoformat()}
+                                         "before sending it again.", "retryable": False, "unknown": True, "at": info.get("at") or datetime.now().isoformat()}
     count = len(state["inflight"])
     state["inflight"] = {}
     return count
@@ -175,7 +175,7 @@ def send(rec: dict, transcript: str, notes: list, state: dict, log, persist=lamb
         result = cr.fire(CLAUDE_URL, CLAUDE_TOKEN, text)
     except cr.RoutineError as err:
         state["inflight"].pop(rid, None)
-        state["failed"][rid] = {"error": str(err), "retryable": err.retryable, "at": datetime.now().isoformat()}
+        state["failed"][rid] = {"error": str(err), "retryable": err.retryable, "unknown": err.unknown, "at": datetime.now().isoformat()}
         if err.retry_after:
             state["not_before"] = time.time() + min(err.retry_after, 3600)
         log(f"✗ {name}: {err}")
@@ -183,7 +183,7 @@ def send(rec: dict, transcript: str, notes: list, state: dict, log, persist=lamb
     except Exception as err:  # the request went out and the answer was unreadable: outcome unknown
         state["inflight"].pop(rid, None)
         state["failed"][rid] = {"error": f"Claude's answer couldn't be read ({type(err).__name__}). Check claude.ai/code before "
-                                         "sending it again.", "retryable": False, "at": datetime.now().isoformat()}
+                                         "sending it again.", "retryable": False, "unknown": True, "at": datetime.now().isoformat()}
         log(f"✗ {name}: unreadable answer from Claude; not retried")
         return False
     state["inflight"].pop(rid, None)
@@ -345,7 +345,7 @@ def page_body(look: str, flash: str | None) -> tuple[str, dict]:
             link = (f'<a class="btn small" href="{e(url)}" target="_blank" rel="noopener noreferrer">Open in Claude ↗</a>'
                     if url.startswith("https://") else "")
             again = (f'<input type="hidden" name="again" value="{e(str(sent.get("at", "")))}">' if sent else "")
-            unsure = bool(failure and failure.get("retryable") is False)
+            unsure = bool(failure and failure.get("unknown"))
             confirm = (' onsubmit="return confirm(\'This starts a second Claude session for this recording. Send it again?\')"' if sent else
                        ' onsubmit="return confirm(\'The last send may have reached Claude. Check claude.ai/code first. Send anyway?\')"' if unsure else "")
             button = (f'<form class="inline" method="post" action="/send"{confirm}><input type="hidden" name="id" value="{e(rid)}">{again}'
