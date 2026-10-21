@@ -332,7 +332,7 @@ def page_body(look: str, flash: str | None) -> tuple[str, dict]:
         except TimeoutError:
             recs, why = None, "Plaud is busy; reload in a moment."
         except pa.PlaudError as err:
-            recs, why = None, f"Plaud said: {str(err).splitlines()[0][:200]}"
+            recs, why = None, f"Plaud said: {(str(err).splitlines() or ['an error with no message'])[0][:200]}"
         for r in recs or []:
             rid = pa.rec_id(r)
             when = pa.recorded_at(r)
@@ -345,7 +345,7 @@ def page_body(look: str, flash: str | None) -> tuple[str, dict]:
             link = (f'<a class="btn small" href="{e(url)}" target="_blank" rel="noopener noreferrer">Open in Claude ↗</a>'
                     if url.startswith("https://") else "")
             again = (f'<input type="hidden" name="again" value="{e(str(sent.get("at", "")))}">' if sent else "")
-            unsure = bool(failure and failure.get("unknown"))
+            unsure = bool(failure and failure.get("unknown", failure.get("retryable") is False))
             confirm = (' onsubmit="return confirm(\'This starts a second Claude session for this recording. Send it again?\')"' if sent else
                        ' onsubmit="return confirm(\'The last send may have reached Claude. Check claude.ai/code first. Send anyway?\')"' if unsure else "")
             button = (f'<form class="inline" method="post" action="/send"{confirm}><input type="hidden" name="id" value="{e(rid)}">{again}'
