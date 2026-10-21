@@ -62,11 +62,18 @@ def claude_on() -> bool:
 # ---------------------------------------------------------------- state
 
 def load() -> dict:
+    """The saved state. A missing file is a fresh start. A damaged one is set aside (never deleted) and the
+    fresh state only sends recordings made from now on, so nothing already in Claude is sent again."""
     try:
         state = json.loads(STATE.read_text())
-    except (OSError, ValueError):
+        if not isinstance(state, dict):
+            raise ValueError("not an object")
+    except FileNotFoundError:
         state = {}
-    for key in ("sent", "failed", "first_seen"):
+    except ValueError:
+        STATE.replace(STATE.with_name(f"{STATE.name}.damaged-{int(time.time())}"))
+        state = {"since": datetime.now().isoformat(), "damaged": True}
+    for key in ("sent", "failed", "first_seen", "inflight"):
         state.setdefault(key, {})
     state.setdefault("fires", [])
     return state
@@ -74,8 +81,22 @@ def load() -> dict:
 
 def save(state: dict) -> None:
     tmp = STATE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, indent=2))
+    with tmp.open("w") as f:
+        f.write(json.dumps(state, indent=2))
+        f.flush()
+        os.fsync(f.fileno())
     tmp.replace(STATE)
+
+
+def settle_inflight(state: dict) -> int:
+    """Sends that were under way when the app stopped: their outcome is unknown, so they are never repeated
+    automatically. Each shows as not sent, with a note to check Claude before sending it again."""
+    for rid, info in state["inflight"].items():
+        state["failed"][rid] = {"error": "The app stopped while this was being sent. Check claude.ai/code for its session "
+                                         "before sending it again.", "retryable": False, "at": info.get("at") or datetime.now().isoformat()}
+    count = len(state["inflight"])
+    state["inflight"] = {}
+    return count
 
 
 # ---------------------------------------------------------------- one recording
@@ -120,30 +141,56 @@ def decide(rec: dict, state: dict, transcript: str, notes: list, manual: bool, n
     return "send"
 
 
-def send(rec: dict, transcript: str, notes: list, state: dict, log) -> bool:
+def send(rec: dict, transcript: str, notes: list, state: dict, log, persist=lambda state: None) -> bool:
+    """Fire the routine once for this recording. The attempt is saved (through `persist`) before the request goes
+    out, so a crash mid-send leaves a record instead of a second session on restart."""
     rid = pa.rec_id(rec)
+    name = rec_name(rec)
     budget = cr.FireBudget([float(s) for s in state["fires"]])
+    wait = state.get("not_before") or 0
+    if wait > time.time():
+        state["failed"][rid] = {"error": f"Waiting: Claude asked to wait until {datetime.fromtimestamp(wait):%H:%M}.", "retryable": True,
+                                "at": datetime.now().isoformat()}
+        log(f"… Claude asked to wait, {name} waits for the next check")
+        return False
     if not budget.available():
         state["failed"][rid] = {"error": "Waiting: Claude's hourly limit for this task is nearly used.", "retryable": True,
                                 "at": datetime.now().isoformat()}
-        log(f"… hourly limit near, {rec.get('name', rid)} waits for the next sync")
+        log(f"… hourly limit near, {name} waits for the next check")
         return False
     when = pa.recorded_at(rec)
     text = cr.build_payload(rec.get("name") or rid, when.strftime("%Y-%m-%d %H:%M") if when else "?", pa.duration(rec), rid,
                             notes or [("Plaud summary", "Plaud has no summary for this recording.")], transcript)
     budget.spend()
     state["fires"] = budget.stamps
+    state["inflight"][rid] = {"at": datetime.now().isoformat()}
+    persist(state)
     try:
         result = cr.fire(CLAUDE_URL, CLAUDE_TOKEN, text)
     except cr.RoutineError as err:
+        state["inflight"].pop(rid, None)
         state["failed"][rid] = {"error": str(err), "retryable": err.retryable, "at": datetime.now().isoformat()}
-        log(f"✗ {rec.get('name', rid)}: {err}")
+        if err.retry_after:
+            state["not_before"] = time.time() + min(err.retry_after, 3600)
+        log(f"✗ {name}: {err}")
         return False
+    except Exception as err:  # the request went out and the answer was unreadable: outcome unknown
+        state["inflight"].pop(rid, None)
+        state["failed"][rid] = {"error": f"Claude's answer couldn't be read ({type(err).__name__}). Check claude.ai/code before "
+                                         "sending it again.", "retryable": False, "at": datetime.now().isoformat()}
+        log(f"✗ {name}: unreadable answer from Claude; not retried")
+        return False
+    state["inflight"].pop(rid, None)
     state["sent"][rid] = {"session_url": result["session_url"], "at": datetime.now().isoformat(),
-                          "with_summary": bool(notes), "name": rec.get("name") or rid}
+                          "with_summary": bool(notes), "name": name}
     state["failed"].pop(rid, None)
-    log(f"→ {rec.get('name', rid)} · {result['session_url']}")
+    log(f"→ {name} · {result['session_url']}")
     return True
+
+
+def rec_name(rec: dict) -> str:
+    name = rec.get("name")
+    return str(name) if name not in (None, "") else pa.rec_id(rec)
 
 
 # ---------------------------------------------------------------- the loop
@@ -157,6 +204,7 @@ class Bridge:
         self.last_sync: str | None = None
         self.next_sync: datetime | None = None
         self.status: dict[str, str] = {}
+        self.adding = threading.Lock()
         threading.Thread(target=self._worker, daemon=True).start()
         if SYNC_EVERY_MIN > 0:
             threading.Thread(target=self._scheduler, daemon=True).start()
@@ -165,11 +213,12 @@ class Bridge:
         self.log.append(f"{datetime.now():%H:%M:%S}  {message}")
 
     def add(self, job: tuple) -> bool:
-        if job in self.pending:
-            return False
-        self.pending.add(job)
-        self.queue.put(job)
-        return True
+        with self.adding:
+            if job in self.pending:
+                return False
+            self.pending.add(job)
+            self.queue.put(job)
+            return True
 
     def _scheduler(self) -> None:
         self.next_sync = datetime.now() + timedelta(seconds=20)
@@ -206,17 +255,32 @@ class Bridge:
                 recs = sorted(pa.list_recordings(p, since, None, None), key=lambda r: pa.recorded_at(r) or datetime.min)
                 sent = 0
                 for rec in recs:
-                    if self._one(p, rec, state, manual=False):
-                        sent += 1
+                    if not (rec.get("id") or rec.get("file_id")):
+                        continue
+                    try:
+                        if self._one(p, rec, state, manual=False):
+                            sent += 1
+                    except pa.NotSignedIn:
+                        raise
+                    except Exception as err:  # one bad recording never holds up the rest
+                        self.status[pa.rec_id(rec)] = "error"
+                        self.say(f"✗ {rec_name(rec)}: couldn't read it from Plaud ({type(err).__name__}); tried again next check")
                     save(state)
                 self.last_sync = datetime.now().strftime("%-d %b %H:%M")
                 self.say(f"Checked {len(recs)} recordings, sent {sent}")
             else:
-                rec = pa.unwrap_file(p.call_json("get_file", file_id=job[1]))
-                self._one(p, rec, state, manual=True)
+                _, rid, again = job
+                sent = state["sent"].get(rid)
+                if sent and sent.get("at") != again:
+                    # A stale or repeated click: this recording is already in Claude (Send again names the send it repeats).
+                    self.say(f"– {sent.get('name') or rid} is already in Claude; not sent again")
+                else:
+                    rec = pa.unwrap_file(p.call_json("get_file", file_id=rid))
+                    if self._one(p, rec, state, manual=True) is None:
+                        self.say(f"– {rec_name(rec)}: Plaud has no transcript for it yet")
             save(state)
 
-    def _one(self, p: pa.Plaud, rec: dict, state: dict, manual: bool) -> bool:
+    def _one(self, p: pa.Plaud, rec: dict, state: dict, manual: bool) -> bool | None:
         rid = pa.rec_id(rec)
         quick = decide(rec, state, "x", ["x"], manual, time.time())
         if quick in ("sent", "before", "failed"):
@@ -226,9 +290,11 @@ class Bridge:
         notes = plaud_notes(p.call("get_note", file_id=rid)) if transcript.strip() else []
         verdict = decide(rec, state, transcript, notes, manual, time.time())
         self.status[rid] = verdict
+        if verdict == "no_transcript":
+            return None
         if verdict != "send":
             return False
-        ok = send(rec, transcript, notes, state, self.say)
+        ok = send(rec, transcript, notes, state, self.say, save)
         self.status[rid] = "sent" if ok else "failed"
         return ok
 
@@ -240,7 +306,7 @@ bridge = None
 
 STATUS = {"sent": ("In Claude", "ok"), "send": ("Sending…", "warn"), "no_transcript": ("No transcript yet", "none"),
           "waiting_summary": ("Waiting for Plaud's summary", "info"), "before": ("Before setup", "none"),
-          "failed": ("Not sent", "warn"), "new": ("Not checked yet", "none")}
+          "failed": ("Not sent", "warn"), "new": ("Not checked yet", "none"), "error": ("Plaud error, retried", "warn")}
 
 
 def page_body(look: str, flash: str | None) -> tuple[str, dict]:
@@ -259,15 +325,20 @@ def page_body(look: str, flash: str | None) -> tuple[str, dict]:
             when = pa.recorded_at(r)
             sent = state["sent"].get(rid)
             failure = state["failed"].get(rid)
+            failed_later = bool(failure and (not sent or str(failure.get("at", "")) > str(sent.get("at", ""))))
             key = "sent" if sent else bridge.status.get(rid) or ("failed" if failure else "new")
             label, kind = STATUS.get(key, (key, "none"))
-            link = (f'<a class="btn small" href="{e(sent["session_url"])}" target="_blank" rel="noopener noreferrer">Open in Claude ↗</a>'
-                    if sent else "")
-            button = (f'<form class="inline" method="post" action="/send"><input type="hidden" name="id" value="{e(rid)}">'
+            url = str(sent.get("session_url") or "") if sent else ""
+            link = (f'<a class="btn small" href="{e(url)}" target="_blank" rel="noopener noreferrer">Open in Claude ↗</a>'
+                    if url.startswith("https://") else "")
+            again = (f'<input type="hidden" name="again" value="{e(str(sent.get("at", "")))}">' if sent else "")
+            confirm = (' onsubmit="return confirm(\'This starts a second Claude session for this recording. Send it again?\')"' if sent else "")
+            button = (f'<form class="inline" method="post" action="/send"{confirm}><input type="hidden" name="id" value="{e(rid)}">{again}'
                       f'<button class="btn small">{"Send again" if sent else "Send now"}</button></form>') if claude_on() else ""
-            err = f'<div class="muted" style="font-size:12px">{e(failure["error"])}</div>' if failure and not sent else ""
+            err = (f'<div class="muted" style="font-size:12px">{"Last send again failed: " if sent else ""}{e(str(failure.get("error", "")))}</div>'
+                   if failed_later else "")
             rows.append(f'<tr><td class="mono" style="white-space:nowrap">{e(when.strftime("%Y-%m-%d %H:%M") if when else "?")}</td>'
-                        f'<td>{e(r.get("name") or rid)}{err}</td><td class="hide-sm">{e(pa.duration(r))}</td>'
+                        f'<td>{e(rec_name(r))}{err}</td><td class="hide-sm">{e(pa.duration(r))}</td>'
                         f'<td><span class="badge {kind}">{e(label)}</span></td><td><div class="row">{link}{button}</div></td></tr>')
         table = (f'<div class="scroll"><table><tr><th>Recorded</th><th>Name</th><th class="hide-sm">Length</th><th>Claude</th><th></th></tr>'
                  f'{"".join(rows)}</table></div>') if rows else f'<p class="muted">{"Plaud is busy; reload in a moment." if recs is None else f"No recordings in the last {SYNC_DAYS} days."}</p>'
@@ -281,11 +352,15 @@ def page_body(look: str, flash: str | None) -> tuple[str, dict]:
     sync_s = (f"Last check {bridge.last_sync}" if bridge.last_sync else "Not checked yet") + (
         f" · next {bridge.next_sync:%-I:%M %p}" if bridge.next_sync else " · automatic checks off")
     who = f'<span class="muted">Plaud: {e(pl["who"])}</span><form class="inline" method="post" action="/plaud/signout"><button class="btn small">Sign out of Plaud</button></form>' if pl["state"] == "signed_in" else ""
+    open_warn = ('<p class="flash">No page password is set, so anyone who can reach this page can send recordings and change the '
+                 'Plaud sign-in. Set one in BoxPilot (Plaud2Claude › Settings › Page password).</p>') if not PASSWORD else ""
+    damaged = ('<p class="flash">The saved state was damaged and was set aside beside it. Only recordings made from now on are sent '
+               'automatically.</p>') if state.get("damaged") else ""
     lock_btn = '<form class="inline" method="post" action="/logout"><button class="btn small">Lock</button></form>' if PASSWORD else ""
     body = f"""<div style="max-width:1100px;margin:0 auto;padding:24px 20px 48px">
 <div class="spread"><div><div class="mono muted" style="font-size:12px">Plaud2Claude {VERSION}</div><h1 style="margin:4px 0 0">Plaud → Claude</h1></div>
 <div class="row">{ui.switcher(ctx)}<form class="inline" method="post" action="/sync"><button class="btn primary">Check now</button></form></div></div>
-<p>{claude_status}</p>{ui.flash(ctx)}{ui.plaud_panel(ctx)}
+<p>{claude_status}</p>{open_warn}{damaged}{ui.flash(ctx)}{ui.plaud_panel(ctx)}
 <section class="panel"><div class="spread" style="margin-bottom:8px"><strong>Recordings · last {SYNC_DAYS} days</strong><span class="muted" style="font-size:13px">{e(sync_s)}</span></div>{table}</section>
 <div class="panel" style="margin-top:16px"><div class="spread" style="margin-bottom:8px"><strong>Activity</strong><span class="muted" style="font-size:13px">{e(bridge.current or "Idle")}</span></div>
 <pre class="log" id="log">{e(chr(10).join(bridge.log) or "Nothing yet.")}</pre></div>
@@ -302,6 +377,7 @@ def page_body(look: str, flash: str | None) -> tuple[str, dict]:
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "Plaud2Claude"
+    timeout = 60  # a client that stops sending is dropped instead of holding a thread
 
     def log_message(self, fmt, *args):
         pass
@@ -317,6 +393,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Frame-Options", "DENY")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "same-origin")
         self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
                                                     "font-src https://fonts.gstatic.com; script-src 'unsafe-inline'; form-action 'self'")
@@ -342,6 +419,8 @@ class Handler(BaseHTTPRequestHandler):
         url = urllib.parse.urlsplit(self.path)
         if url.path == "/healthz":
             return self._send(200, "ok", "text/plain")
+        if not core.host_allowed(self.headers, os.environ.get("P2C_ALLOWED_HOSTS", "")):
+            return self._send(421, "Unknown host name. Add it to P2C_ALLOWED_HOSTS to use it.", "text/plain")
         if not passwords.valid(core.cookie(self.headers, COOKIE) or ""):
             return self._send(401, ui.login_page(self._ctx()))
         if url.path == "/api/status":
@@ -355,16 +434,20 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urllib.parse.urlsplit(self.path).path
-        if not core.same_origin(self.headers):
+        if not core.same_origin(self.headers) or not core.host_allowed(self.headers, os.environ.get("P2C_ALLOWED_HOSTS", "")):
             return self._send(403, "Cross-site request refused.", "text/plain")
-        length = min(int(self.headers.get("Content-Length") or 0), 16384)
-        form = {k: v[0] for k, v in urllib.parse.parse_qs(self.rfile.read(length).decode()).items()}
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = -1
+        if not 0 <= length <= 16384:
+            return self._send(413, "Request too large.", "text/plain")
+        form = {k: v[0] for k, v in urllib.parse.parse_qs(self.rfile.read(length).decode(errors="replace")).items()}
         back = core.safe_back(form.get("back", "/"))
         if path == "/login":
             if passwords.check(form.get("password", "")):
                 secure = "; Secure" if self.headers.get("X-Forwarded-Proto") == "https" else ""
                 return self._redirect("/", headers={"Set-Cookie": f"{COOKIE}={passwords.make()}; Path=/; HttpOnly; SameSite=Strict; Max-Age={30 * 86400}{secure}"})
-            time.sleep(1)
             return self._send(401, ui.login_page(self._ctx(), "Wrong password."))
         if not passwords.valid(core.cookie(self.headers, COOKIE) or ""):
             return self._send(401, ui.login_page(self._ctx()))
@@ -390,8 +473,10 @@ class Handler(BaseHTTPRequestHandler):
             rid = form.get("id", "")
             if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", rid):
                 return self._redirect("/", "Unknown recording.")
-            bridge.add(("send", rid))
-            return self._redirect("/", "Sending to Claude.")
+            again = form.get("again", "")
+            if not bridge.add(("send", rid, again)):
+                return self._redirect("/", "That send is already queued.")
+            return self._redirect("/", "Sending to Claude." if not again else "Sending to Claude again.")
         self._send(404, "Not found", "text/plain")
 
 
@@ -401,6 +486,9 @@ def main() -> None:
     if DEFAULT_LOOK not in ui.LOOKS:
         raise SystemExit(f"P2C_LOOK must be one of {', '.join(ui.LOOKS)}")
     state = load()
+    unknown = settle_inflight(state)
+    if unknown:
+        print(f"{unknown} send(s) were under way when the app stopped; marked as not sent (check Claude).", flush=True)
     if claude_on() and not state.get("since"):
         state["since"] = datetime.now().isoformat()
     save(state)
