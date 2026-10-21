@@ -26,7 +26,7 @@ import openplaud_core as core
 import openplaud_ui as ui
 import plaud_ai as pa
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 PORT = int(os.environ.get("P2C_PORT", "8796"))
 PASSWORD = os.environ.get("P2C_PASSWORD", "")
 SYNC_EVERY_MIN = int(os.environ.get("P2C_SYNC_EVERY", "30") or 0)

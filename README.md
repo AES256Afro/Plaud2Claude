@@ -18,7 +18,7 @@ docker run -d -p 8796:8796 -v plaud2claude:/data \
   -e P2C_PASSWORD=choose-one \
   -e CLAUDE_ROUTINE_URL=https://api.anthropic.com/v1/claude_code/routines/trig_.../fire \
   -e CLAUDE_ROUTINE_TOKEN=sk-ant-oat01-... \
-  ghcr.io/aes256afro/plaud2claude:0.1.0
+  ghcr.io/aes256afro/plaud2claude:0.2.0
 ```
 
 It's also in the BoxPilot App Catalog.

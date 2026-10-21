@@ -1,6 +1,6 @@
 # Plaud2Claude reuses OpenPlaud's image: Node + the Plaud MCP server, the headless Plaud sign-in,
 # the Claude scheduled-task sender and the page styles. It adds only its own loop and page.
-FROM ghcr.io/aes256afro/openplaud:0.4.0
+FROM ghcr.io/aes256afro/openplaud:0.5.0
 
 COPY plaud2claude.py /app/plaud2claude.py
 
