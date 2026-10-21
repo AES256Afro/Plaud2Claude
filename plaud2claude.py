@@ -51,7 +51,7 @@ Do not change any repository; this task only reads and writes the session."""
 
 plaud = core.PlaudSession(SYNC_DAYS)
 signin = core.PlaudSignIn(plaud, AUTH_URL_FILE)
-passwords = core.Passwords(PASSWORD, b"plaud2claude-session:")
+passwords = core.Passwords(PASSWORD, b"plaud2claude-session:", 30, DATA / ".session-secret")
 lock = threading.Lock()
 
 
@@ -369,7 +369,7 @@ def page_body(look: str, flash: str | None) -> tuple[str, dict]:
                  'Plaud sign-in. Set one in BoxPilot (Plaud2Claude › Settings › Page password).</p>') if not PASSWORD else ""
     damaged = ('<p class="flash">The saved state was damaged and was set aside beside it. Only recordings made from now on are sent '
                'automatically.</p>') if time.time() - float(state.get("damaged_at") or 0) < 86400 else ""
-    lock_btn = '<form class="inline" method="post" action="/logout"><button class="btn small">Lock</button></form>' if PASSWORD else ""
+    lock_btn = '<form class="inline" method="post" action="/logout"><button class="btn small" title="Signs out every browser and phone">Lock</button></form>' if PASSWORD else ""
     body = f"""<div style="max-width:1100px;margin:0 auto;padding:24px 20px 48px">
 <div class="spread"><div><div class="mono muted" style="font-size:12px">Plaud2Claude {VERSION}</div><h1 style="margin:4px 0 0">Plaud → Claude</h1></div>
 <div class="row">{ui.switcher(ctx)}<form class="inline" method="post" action="/sync"><button class="btn primary">Check now</button></form></div></div>
@@ -465,6 +465,7 @@ class Handler(BaseHTTPRequestHandler):
         if not passwords.valid(core.cookie(self.headers, COOKIE) or ""):
             return self._send(401, ui.login_page(self._ctx()))
         if path == "/logout":
+            passwords.end_all()
             return self._redirect("/", headers={"Set-Cookie": f"{COOKIE}=; Path=/; Max-Age=0"})
         if path == "/look":
             look = form.get("look", "")
