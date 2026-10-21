@@ -129,6 +129,7 @@ class SweepOne(unittest.TestCase):
         p2c.pa.list_recordings = lambda *a: list(recs)
         bridge = p2c.Bridge.__new__(p2c.Bridge)
         bridge.log, bridge.status, bridge.last_sync = [], {}, None
+        bridge.clock = p2c.core.CheckClock(30)
         bridge.say = bridge.log.append
         bridge._run(job)
         return bridge
@@ -188,6 +189,24 @@ class SweepOne(unittest.TestCase):
         self.run_job(("sync",), [rec()])
         self.assertEqual(Fake.texts, [])
         self.assertFalse(p2c.load()["failed"]["r1"]["retryable"])
+
+
+    def test_a_recording_waiting_on_plaud_brings_the_next_check_forward(self):
+        fresh_state()
+        bridge = self.run_job(("sync",), [rec("silent")])
+        self.assertTrue(bridge.clock.quick_mode)
+        self.assertLess(bridge.clock.next - time.time(), 200)
+        self.assertIn("silent", p2c.load()["waiting_since"])
+        bridge = self.run_job(("sync",), [rec("r5")])
+        self.assertFalse(bridge.clock.quick_mode)
+        self.assertEqual(p2c.load()["waiting_since"], {})
+
+    def test_the_check_trigger_needs_its_token(self):
+        token = "t" * 24
+        self.assertTrue(p2c.core.trigger_allowed({"Authorization": "Bearer " + token}, token))
+        self.assertFalse(p2c.core.trigger_allowed({"Authorization": "Bearer nope"}, token))
+        self.assertFalse(p2c.core.trigger_allowed({}, token))
+        self.assertFalse(p2c.core.trigger_allowed({"Authorization": "Bearer short"}, "short"))
 
 
 if __name__ == "__main__":

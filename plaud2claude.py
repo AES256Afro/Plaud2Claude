@@ -26,9 +26,13 @@ import openplaud_core as core
 import openplaud_ui as ui
 import plaud_ai as pa
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 PORT = int(os.environ.get("P2C_PORT", "8796"))
 PASSWORD = os.environ.get("P2C_PASSWORD", "")
+# A secret for POST /api/check (a phone shortcut or another service can start a check); empty turns it off.
+CHECK_TOKEN = os.environ.get("P2C_CHECK_TOKEN", "").strip()
+# Opening the page starts a check when the last one is older than this many minutes; 0 turns it off.
+CHECK_ON_OPEN_MIN = float(os.environ.get("P2C_CHECK_ON_OPEN", "5") or 0)
 SYNC_EVERY_MIN = int(os.environ.get("P2C_SYNC_EVERY", "30") or 0)
 SYNC_DAYS = int(os.environ.get("P2C_SYNC_DAYS", "3") or 3)
 WAIT_FOR_SUMMARY_MIN = int(os.environ.get("P2C_WAIT_FOR_SUMMARY", "30") or 0)
@@ -78,7 +82,7 @@ def load() -> dict:
             STATE.replace(STATE.with_name(f"{STATE.name}.damaged-{int(time.time())}"))
             state = {"since": datetime.now().isoformat(), "damaged_at": time.time()}
             save(state)
-    for key in ("sent", "failed", "first_seen", "inflight"):
+    for key in ("sent", "failed", "first_seen", "inflight", "waiting_since"):
         state.setdefault(key, {})
     state.setdefault("fires", [])
     return state
@@ -208,7 +212,7 @@ class Bridge:
         self.pending: set = set()
         self.current: str | None = None
         self.last_sync: str | None = None
-        self.next_sync: datetime | None = None
+        self.clock = core.CheckClock(SYNC_EVERY_MIN, first_delay=20)
         self.status: dict[str, str] = {}
         self.adding = threading.Lock()
         threading.Thread(target=self._worker, daemon=True).start()
@@ -226,13 +230,22 @@ class Bridge:
             self.queue.put(job)
             return True
 
+    @property
+    def next_sync(self) -> datetime | None:
+        return self.clock.next_text()
+
     def _scheduler(self) -> None:
-        self.next_sync = datetime.now() + timedelta(seconds=20)
-        time.sleep(20)
         while True:
-            self.next_sync = datetime.now() + timedelta(minutes=SYNC_EVERY_MIN)
-            self.add(("sync",))
-            time.sleep(SYNC_EVERY_MIN * 60)
+            time.sleep(10)
+            if self.clock.take_due():
+                self.add(("sync",))
+
+    def check_on_open(self) -> bool:
+        """Opening the page starts a check when the last one is stale (and Plaud is signed in). True if it did."""
+        if CHECK_ON_OPEN_MIN and self.clock.stale(CHECK_ON_OPEN_MIN) and not self.current and self.queue.empty() \
+                and plaud.cached_user():
+            return self.add(("sync",))
+        return False
 
     def _worker(self) -> None:
         while True:
@@ -261,7 +274,11 @@ class Bridge:
                 save(state)
             if job[0] == "sync":
                 since = (date.today() - timedelta(days=SYNC_DAYS)).isoformat()
-                recs = sorted(pa.list_recordings(p, since, None, None), key=lambda r: pa.recorded_at(r) or datetime.min)
+                try:
+                    recs = sorted(pa.list_recordings(p, since, None, None), key=lambda r: pa.recorded_at(r) or datetime.min)
+                except BaseException:
+                    self.clock.checked()
+                    raise
                 sent = 0
                 for rec in recs:
                     if not (rec.get("id") or rec.get("file_id")):
@@ -275,8 +292,15 @@ class Bridge:
                         self.status[pa.rec_id(rec)] = "error"
                         self.say(f"✗ {rec_name(rec)}: couldn't read it from Plaud ({type(err).__name__}); tried again next check")
                     save(state)
+                # Recordings still waiting on Plaud (no transcript or summary yet) bring the next check forward.
+                now = time.time()
+                waiting = {pa.rec_id(r) for r in recs if self.status.get(pa.rec_id(r)) in ("no_transcript", "waiting_summary")}
+                state["waiting_since"] = {rid: state["waiting_since"].get(rid, now) for rid in waiting}
+                save(state)
+                self.clock.checked(list(state["waiting_since"].values()))
                 self.last_sync = datetime.now().strftime("%-d %b %H:%M")
-                self.say(f"Checked {len(recs)} recordings, sent {sent}")
+                self.say(f"Checked {len(recs)} recordings, sent {sent}"
+                         + ("; one is still waiting on Plaud, checking again in a few minutes" if self.clock.quick_mode else ""))
             else:
                 _, rid, again = job
                 sent = state["sent"].get(rid)
@@ -427,6 +451,17 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
+    def _trigger(self):
+        """POST /api/check with `Authorization: Bearer <P2C_CHECK_TOKEN>`: check Plaud now. For phone shortcuts and
+        other services; it needs no page password or cookie, only the token."""
+        if not CHECK_TOKEN:
+            return self._send(404, "Not found", "text/plain")
+        if not core.host_allowed(self.headers, os.environ.get("P2C_ALLOWED_HOSTS", "")) or \
+                not core.trigger_allowed(self.headers, CHECK_TOKEN):
+            return self._send(403, json.dumps({"error": "wrong or missing check token"}), "application/json")
+        queued = bridge.add(("sync",))
+        return self._send(202, json.dumps({"queued": queued, "already_queued": not queued}), "application/json")
+
     def _ctx(self) -> dict:
         return {"look": self._look(), "flash": None, "here": "/", "folder": "", "folders": []}
 
@@ -445,10 +480,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(404, ui.page(self._ctx(), "Not found", '<p style="padding:20px">Not found. <a href="/">Back</a></p>'))
         flash = urllib.parse.parse_qs(url.query).get("msg", [None])[0]
         body, meta = page_body(self._look(), flash)
-        self._send(200, ui.page(meta["ctx"], "Plaud2Claude", body, poll=meta["busy"]))
+        started = bridge.check_on_open()
+        self._send(200, ui.page(meta["ctx"], "Plaud2Claude", body, poll=meta["busy"] or started))
 
     def do_POST(self):
         path = urllib.parse.urlsplit(self.path).path
+        if path == "/api/check":
+            return self._trigger()
         if not core.same_origin(self.headers) or not core.host_allowed(self.headers, os.environ.get("P2C_ALLOWED_HOSTS", "")):
             return self._send(403, "Cross-site request refused.", "text/plain")
         try:

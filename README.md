@@ -18,7 +18,7 @@ docker run -d -p 8796:8796 -v plaud2claude:/data \
   -e P2C_PASSWORD=choose-one \
   -e CLAUDE_ROUTINE_URL=https://api.anthropic.com/v1/claude_code/routines/trig_.../fire \
   -e CLAUDE_ROUTINE_TOKEN=sk-ant-oat01-... \
-  ghcr.io/aes256afro/plaud2claude:0.2.0
+  ghcr.io/aes256afro/plaud2claude:0.3.0
 ```
 
 It's also in the BoxPilot App Catalog.
@@ -40,11 +40,27 @@ for Plaud's summary.
 | `CLAUDE_ROUTINE_URL` | Fire URL of the scheduled task's API trigger (or just its `trig_…` id) | |
 | `CLAUDE_ROUTINE_TOKEN` | That trigger's token | |
 | `P2C_PASSWORD` | Password for the page (recommended: without one, anyone who can reach the page can send recordings) | |
+| `P2C_CHECK_TOKEN` | Secret for the check trigger, `POST /api/check` (see below); empty turns the trigger off | |
+| `P2C_CHECK_ON_OPEN` | Opening the page checks Plaud when the last check is older than this many minutes; `0` turns it off | `5` |
 | `P2C_ALLOWED_HOSTS` | Extra host names the page answers to, comma-separated. IP addresses, `localhost`, `*.local`, single-label names and `*.ts.net` always work. | |
 | `P2C_SYNC_EVERY` | Minutes between checks for new recordings; `0` turns it off | `30` |
 | `P2C_SYNC_DAYS` | How far back each check looks | `3` |
 | `P2C_WAIT_FOR_SUMMARY` | Minutes to wait for Plaud's own summary before sending without it | `30` |
 | `P2C_LOOK` | Page style: any OpenPlaud look (`console`, `inbox`, `phone`…) | `console` |
+
+## Checking for new recordings right away
+
+Besides the schedule (30 minutes by default), a check starts when:
+
+- you press **Check now** on the page;
+- you open the page and the last check is more than 5 minutes old (`P2C_CHECK_ON_OPEN`, minutes; `0` turns it off);
+- a recent recording is still waiting on Plaud for its transcript or summary: the app checks again every 3 minutes for up to an hour, so it shows up soon after Plaud finishes;
+- something calls the **check trigger**: `POST /api/check` with the header `Authorization: Bearer <P2C_CHECK_TOKEN>`. It needs no page password, only that token (16 characters or more; BoxPilot generates one, shown under the app's Secrets).
+
+An iPhone Shortcut that checks after a meeting: add **Get Contents of URL**, set the URL to
+`https://<your-box>.ts.net:8796/api/check`, Method **POST**, and a header `Authorization` = `Bearer <your check token>`.
+Run it from the Home Screen, the Action button or an automation (for example, when the Plaud app closes).
+From a computer: `curl -X POST -H "Authorization: Bearer $TOKEN" https://<your-box>.ts.net:8796/api/check`.
 
 ## Good to know
 
