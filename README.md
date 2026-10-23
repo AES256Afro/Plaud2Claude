@@ -124,6 +124,13 @@ jq '{id: (.file | sub("\\.[^.]+$"; "") | gsub("[^A-Za-z0-9_-]"; "-") | .[0:80]),
       -H "Authorization: Bearer $P2C_INGEST_TOKEN" -H "Content-Type: application/json" --data-binary @-
 ```
 
+## Collector
+
+[`collector/`](collector/README.md) holds the matching collector: a Python tool for the computer beside a PLAUD
+NotePin S or Note Pro that pulls recordings over Bluetooth with the plaude-hla toolkit (a git submodule, so clone
+with `--recurse-submodules`), decrypts them with your account's key, transcribes them there with faster-whisper,
+and pushes the transcripts here. It is not part of the Docker image.
+
 ## Good to know
 
 - **Only new recordings:** recordings made after the Claude settings are first saved are sent automatically.
