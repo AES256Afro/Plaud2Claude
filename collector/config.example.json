@@ -1,0 +1,8 @@
+{
+  "server_url": "https://<your-box>.ts.net:8796",
+  "ingest_token": "<P2C_INGEST_TOKEN from the Plaud2Claude card in BoxPilot>",
+  "source": "notepin-s via collector on <this computer>",
+  "output_dir": "",
+  "whisper_model": "small",
+  "language": "en"
+}

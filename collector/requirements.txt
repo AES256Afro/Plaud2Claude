@@ -1,0 +1,6 @@
+# The collector and the plaude-hla toolkit it drives (vendor/plaude-hla; its opuslib and numpy are only for
+# avc_to_ogg.py, which the collector never imports).
+bleak>=0.22
+cryptography>=42
+requests
+faster-whisper

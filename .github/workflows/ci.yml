@@ -16,8 +16,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Image builds
         run: docker build -t plaud2claude:ci .
-      - name: Tests (inside the image, beside OpenPlaud's modules)
-        run: docker run --rm -v "$PWD/tests:/tests:ro" -v "$PWD/plaud2claude.py:/app/plaud2claude.py:ro" -w /app plaud2claude:ci python3 -m unittest discover -s /tests -v
+      - name: Tests (inside the image, beside OpenPlaud's modules; the collector is mounted for its unit tests)
+        run: docker run --rm -v "$PWD/tests:/tests:ro" -v "$PWD/collector:/collector:ro" -v "$PWD/plaud2claude.py:/app/plaud2claude.py:ro" -w /app plaud2claude:ci python3 -m unittest discover -s /tests -v
       - name: Container serves its page
         run: |
           docker run -d --name p2c -p 8796:8796 -e P2C_SYNC_EVERY=0 plaud2claude:ci
