@@ -1,0 +1,3 @@
+[submodule "collector/vendor/plaude-hla"]
+	path = collector/vendor/plaude-hla
+	url = https://github.com/hardware-liberation-army/plaude-hla
