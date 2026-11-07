@@ -23,7 +23,7 @@ PAGE_STATE = {"state": "signed_out", "who": None, "url": None, "message": None, 
 def push(rid="loc1", **extra):
     """What a collector sends: OpenPlaudit's transcript JSON mapped onto the contract."""
     body = {"id": rid, "name": "Standup", "transcript": "Line one.\nLine two.", "recorded_at": "2026-10-22T14:03:00-04:00",
-            "duration_seconds": 61.5, "source": "plaude on chris-pc", "model": "whisper small",
+            "duration_seconds": 61.5, "source": "plaude on my-pc", "model": "whisper small",
             "segments": [{"start": 0.0, "end": 2.5, "text": "Line one."}, {"start": 2.5, "end": 5.0, "text": "Line two."}]}
     body.update(extra)
     return {k: v for k, v in body.items() if v is not ...}
@@ -143,7 +143,7 @@ class Ingest(LocalCase):
         self.assertEqual(self.queued(), [("local", "loc1", False)])
         saved = json.loads(p2c.local_file("loc1").read_text(encoding="utf-8"))
         self.assertEqual(saved["transcript"], "Line one.\nLine two.")
-        self.assertEqual(saved["source"], "plaude on chris-pc")
+        self.assertEqual(saved["source"], "plaude on my-pc")
         self.assertTrue(saved["received_at"])
         status, body = post("/api/recordings", push(name="Standup, renamed"))  # pushed again while still queued
         self.assertEqual((status, body), (202, {"queued": True, "already_queued": False}))
@@ -194,7 +194,7 @@ class LocalJob(LocalCase):
         self.assertIn(f"Recorded: {when:%Y-%m-%d %H:%M}\n", text)
         self.assertIn("Length: 1m01s\n", text)
         self.assertIn("Plaud file ID: loc1\n", text)
-        self.assertIn("===== Local transcript =====\nTranscribed by plaude on chris-pc with whisper small. Plaud's cloud was not used: "
+        self.assertIn("===== Local transcript =====\nTranscribed by plaude on my-pc with whisper small. Plaud's cloud was not used: "
                       "there is no Plaud summary, and the Plaud connector cannot fetch this recording.", text)
         self.assertIn("===== Transcript =====\n[00:00 - 00:02] Line one.\n[00:02 - 00:05] Line two.\n", text)
         sent = p2c.load()["sent"]["loc1"]
@@ -285,7 +285,7 @@ class Page(LocalCase):
         body, meta = p2c.page_body("console", None)
         self.assertIn("Recordings · last 3 days · 1 local", body)
         self.assertIn("Standup", body)
-        self.assertIn('title="Transcribed plaude on chris-pc · whisper small">Local</span>', body)
+        self.assertIn('title="Transcribed plaude on my-pc · whisper small">Local</span>', body)
         self.assertIn(">Received<", body)
         self.assertIn('<input type="hidden" name="id" value="loc1">', body)
         self.assertIn("<td class=\"hide-sm\">1m01s</td>", body)

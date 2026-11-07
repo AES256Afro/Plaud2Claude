@@ -85,7 +85,7 @@ cookie is needed, only the token. Without the token set, the endpoint doesn't ex
 | `recorded_at` | optional | ISO 8601 with a time zone, like `2026-10-22T14:03:00-04:00` (a time without one is read as UTC, like Plaud's) |
 | `duration_seconds` | optional | number |
 | `segments` | optional | `[{"start": 0.0, "end": 2.5, "text": "…"}, …]` in seconds. When given, Claude reads timestamped lines built from them, like Plaud's own transcripts; otherwise `transcript` as it came. |
-| `source` | optional | who made it, like `plaude on chris-pc`; shown on the page and told to Claude |
+| `source` | optional | who made it, like `plaude on my-pc`; shown on the page and told to Claude |
 | `model` | optional | like `whisper small` |
 | `again` | optional | `true` sends a recording that is already in Claude once more (a second session). Default `false`. |
 
@@ -109,7 +109,7 @@ From a computer:
 curl -sS -X POST "https://<your-box>.ts.net:8796/api/recordings" \
   -H "Authorization: Bearer $P2C_INGEST_TOKEN" -H "Content-Type: application/json" \
   -d '{"id": "2026-10-22-standup", "name": "Standup", "recorded_at": "2026-10-22T14:03:00-04:00",
-       "duration_seconds": 61.5, "source": "plaude on chris-pc", "model": "whisper small",
+       "duration_seconds": 61.5, "source": "plaude on my-pc", "model": "whisper small",
        "transcript": "Line one.\nLine two."}'
 ```
 
@@ -119,7 +119,7 @@ replaced), `text` becomes `transcript`, and `duration_seconds`, `model` and `seg
 
 ```bash
 jq '{id: (.file | sub("\\.[^.]+$"; "") | gsub("[^A-Za-z0-9_-]"; "-") | .[0:80]), name: .file, transcript: .text,
-     duration_seconds, model, segments, source: "plaude on chris-pc"}' transcript.json \
+     duration_seconds, model, segments, source: "plaude on my-pc"}' transcript.json \
   | curl -sS -X POST "https://<your-box>.ts.net:8796/api/recordings" \
       -H "Authorization: Bearer $P2C_INGEST_TOKEN" -H "Content-Type: application/json" --data-binary @-
 ```
