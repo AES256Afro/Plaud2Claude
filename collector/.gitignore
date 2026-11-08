@@ -1,0 +1,6 @@
+identity.json
+identity.json.bak.*
+config.json
+state.json
+.venv/
+__pycache__/
